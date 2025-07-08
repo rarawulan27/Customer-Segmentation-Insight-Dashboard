@@ -1,0 +1,136 @@
+---Analisi Trend--------
+SELECT
+  o.order_id,
+  o.status AS order_status,
+  o.created_at,
+  o.returned_at,
+  o.shipped_at,
+  TIMESTAMP_DIFF(o.shipped_at, o.created_at, DAY) AS days_to_ship,
+  
+  u.id AS user_id,
+  u.gender AS user_gender,
+  u.age AS user_age,
+  u.state AS user_state,
+  u.created_at AS user_created_at,
+
+  oi.product_id,
+  oi.sale_price,
+  p.cost,
+
+  p.name AS product_name,
+  p.brand AS product_brand,
+  p.category AS product_category
+
+FROM `bigquery-public-data.thelook_ecommerce.orders` o
+JOIN `bigquery-public-data.thelook_ecommerce.order_items` oi
+  ON o.order_id = oi.order_id
+JOIN `bigquery-public-data.thelook_ecommerce.products` p
+  ON oi.product_id = p.id
+JOIN `bigquery-public-data.thelook_ecommerce.users` u
+  ON o.user_id = u.id
+WHERE o.created_at IS NOT NULL
+----Analisi funnel customer cancel-----
+WITH users AS (
+  SELECT
+    id AS user_id,
+    DATE(created_at) AS signup_date
+  FROM `bigquery-public-data.thelook_ecommerce.users`
+),
+
+orders AS (
+  SELECT
+    user_id,
+    DATE(created_at) AS order_date,
+    status
+  FROM `bigquery-public-data.thelook_ecommerce.orders`
+),
+
+-- Step per user
+user_funnel AS (
+  SELECT
+    u.user_id,
+
+    -- Step 1: Registered
+    1 AS step_1_registered,
+
+    -- Step 2: Pernah buat order
+    CASE WHEN COUNT(o.order_date) > 0 THEN 1 ELSE 0 END AS step_2_ordered,
+
+    -- Step 3: Pernah ada order processed
+    CASE WHEN COUNTIF(o.status = 'Processing') > 0 THEN 1 ELSE 0 END AS step_3_processed,
+
+    -- Step 4: Pernah ada order shipped
+    CASE WHEN COUNTIF(o.status = 'Shipped') > 0 THEN 1 ELSE 0 END AS step_4_shipped
+
+  FROM users u
+  LEFT JOIN orders o ON u.user_id = o.user_id
+  GROUP BY u.user_id
+),
+
+-- Aggregate total users per step
+funnel_summary AS (
+  SELECT
+    COUNT(DISTINCT user_id) AS total_users,
+    SUM(step_1_registered) AS registered,
+    SUM(step_2_ordered) AS ordered,
+    SUM(step_3_processed) AS processed,
+    SUM(step_4_shipped) AS shipped
+  FROM user_funnel
+)
+
+-- Final output
+SELECT
+  'Registered' AS step, registered AS users, ROUND(100 * registered / total_users, 2) AS conversion_rate FROM funnel_summary
+UNION ALL
+SELECT
+  'Ordered', ordered, ROUND(100 * ordered / total_users, 2) FROM funnel_summary
+UNION ALL
+SELECT
+  'Processed', processed, ROUND(100 * processed / total_users, 2) FROM funnel_summary
+UNION ALL
+SELECT
+  'Shipped', shipped, ROUND(100 * shipped / total_users, 2) FROM funnel_summary;
+-----Behavior Cancel ------
+SELECT
+  user_id,
+  COUNT(*) AS total_orders,
+  COUNTIF(status = 'Cancelled') AS cancelled_orders,
+  MIN(DATE(created_at)) AS first_order_date,
+  MAX(DATE(created_at)) AS last_order_date
+FROM `bigquery-public-data.thelook_ecommerce.orders`
+GROUP BY user_id
+HAVING cancelled_orders > 0
+-----Waktu Cancel customer-----
+SELECT
+  EXTRACT(DAYOFWEEK FROM created_at) AS cancel_day,
+  EXTRACT(HOUR FROM created_at) AS cancel_hour,
+  COUNT(*) AS cancel_count
+FROM `bigquery-public-data.thelook_ecommerce.orders`
+WHERE status = 'Cancelled'
+GROUP BY cancel_day, cancel_hour
+ORDER BY cancel_count DESC;
+----traffic_source by cancelled orders-----
+SELECT
+  u.id AS user_id,
+  u.traffic_source,
+  COUNT(o.user_id) AS total_orders,
+  COUNTIF(o.status = 'Cancelled') AS cancelled_orders,
+  ROUND(100 * COUNTIF(o.status = 'Cancelled') / COUNT(o.user_id), 2) AS cancel_rate
+FROM `bigquery-public-data.thelook_ecommerce.users` u
+JOIN `bigquery-public-data.thelook_ecommerce.orders` o
+  ON u.id = o.user_id
+GROUP BY u.id, u.traffic_source
+HAVING cancelled_orders > 0
+------product cancel by category dan brand -----
+SELECT
+  p.name AS product_name,
+  p.category,p.brand,
+  COUNT(*) AS cancel_count
+FROM `bigquery-public-data.thelook_ecommerce.order_items` oi
+JOIN `bigquery-public-data.thelook_ecommerce.orders` o
+  ON oi.order_id = o.order_id
+JOIN `bigquery-public-data.thelook_ecommerce.products` p
+  ON oi.product_id = p.id
+WHERE o.status = 'Cancelled'
+GROUP BY p.name, p.category,p.brand
+ORDER BY cancel_count DESC;
